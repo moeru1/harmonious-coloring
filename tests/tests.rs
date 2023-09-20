@@ -1,9 +1,9 @@
 use anyhow::{anyhow, Result};
-use std::fs::File;
-use std::io::{BufRead, BufReader};
-use std::path::{PathBuf, Path};
 use std::cell::RefCell;
 use std::ffi::OsStr;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 
 use harmonious_coloring::{graph, graph::Graph, harmonious::HarmoniousColoring};
 
@@ -30,14 +30,19 @@ fn file_out_parser(filename: &Path) -> Result<Vec<usize>> {
                 state = State::Coloring;
                 let mut split = line.split("=");
                 split.next();
-                let num_str = split.next()
-                    .ok_or(anyhow!("Error: expected the following format.\nh = <usize>"))?;
-                let h = num_str.trim().parse::<usize>().map_err(|_| anyhow!("{num_str} cannot be parsed to usize"))?;
+                let num_str = split.next().ok_or(anyhow!(
+                    "Error: expected the following format.\nh = <usize>"
+                ))?;
+                let h = num_str
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| anyhow!("{num_str} cannot be parsed to usize"))?;
                 harmonious.push(h);
             }
             State::Coloring => {
                 state = State::Diamater;
             }
+
             State::Diamater => {
                 state = State::EmptyLine;
             }
@@ -64,7 +69,7 @@ fn get_filenames(dir: &str, filter_ext: &OsStr) -> Result<Vec<PathBuf>> {
                 None
             }
         })
-    .collect::<Vec<_>>();
+        .collect::<Vec<_>>();
     Ok(paths)
 }
 
@@ -76,7 +81,11 @@ fn test_all() -> Result<()> {
     files_out.sort();
     //let mut ref_solutions = Vec::new();
     for (file_in, file_out) in files_in.iter().zip(&files_out) {
-        println!("{:?} {:?}",file_in.file_name().unwrap(), file_out.file_name().unwrap());
+        println!(
+            "{:?} {:?}",
+            file_in.file_name().unwrap(),
+            file_out.file_name().unwrap()
+        );
         let reference_solution = file_out_parser(file_out.as_path())?;
 
         const MAX_N: usize = 50;
