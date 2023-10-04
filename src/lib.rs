@@ -17,13 +17,13 @@ impl Config {
 }
 
 pub mod graph {
-    use anyhow::{anyhow,  Result};
+    use anyhow::{anyhow, Result};
     use std::fs::File;
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Lines};
+    use std::iter::Filter;
     use std::iter::Take;
-    use std::slice::Iter;
     use std::path::Path;
-
+    use std::slice::Iter;
 
     #[derive(Debug)]
     enum State {
@@ -31,7 +31,6 @@ pub mod graph {
         Name,
         List,
     }
-
 
     pub struct Graph<const MAX_N: usize> {
         pub adj_list: [Vec<usize>; MAX_N],
@@ -61,29 +60,81 @@ pub mod graph {
         }
     }
 
-    pub fn parse_file<const MAX_N: usize, F>(file_path: &Path, func: F) -> Result<()>
-        where
-            F: Fn(Graph<MAX_N>) -> (),
-        {
-            let f = File::open(file_path)?;
-            let buffer = BufReader::new(f);
+    fn filter_buffer(line: &std::result::Result<String, std::io::Error>) -> bool {
+        !line.as_ref().unwrap().is_empty()
+    }
 
-            let mut graph: Option<Graph<MAX_N>> = None;
-            let mut list_counter = 1;
-            let mut state = State::Header;
+    struct FilterNewLine<I> {
+        inner: Lines<I>,
+    }
 
-            let mut n = 0;
-            let mut num_graphs = 0;
-            let mut line_num = 1;
+    impl<B: BufRead> FilterNewLine<B> {
+        pub fn new(inner: B) -> Self {
+            Self { inner: inner.lines() }
+        }
+    }
 
-            let mut buffer_it = buffer
-                .lines()
-                .filter(|line| !line.as_ref().unwrap().is_empty());
+    impl<B: BufRead> Iterator for FilterNewLine<B> {
+        type Item = Result<String, std::io::Error>;
 
+        fn next(&mut self) -> Option<Self::Item> {
+            loop {
+                let line = match self.inner.next() {
+                    Some(line) => match line {
+                        Ok(line) => line,
+                        Err(err) => return Some(Err(err)),
+                    },
+                    None => return None,
+                };
+                if !line.is_empty() {
+                    return Some(Ok(line));
+                }
+            }
+        }
+    }
 
-            for line in buffer_it {
-                let line = line?;
-                match state {
+    pub struct ParseIterator<const MAX_N: usize, B: BufRead> {
+        inner: FilterNewLine<B>,
+        graph: Option<Graph<MAX_N>>,
+        list_counter: usize,
+        state: State,
+        n: usize,
+        num_graphs: usize,
+        line_num: usize,
+    }
+
+    impl<const MAX_N: usize, B: BufRead>
+        ParseIterator<MAX_N, B>
+    {
+        pub fn new(inner: B) -> Result<Self> {
+            let a = ParseIterator::<MAX_N, B> {
+                inner: FilterNewLine::new(inner),
+                graph: None,
+                list_counter: 1,
+                state: State::Header,
+                n: 0,
+                num_graphs: 0,
+                line_num: 1,
+            };
+            Ok(a)
+        }
+    }
+
+    impl<const MAX_N: usize, B: BufRead> Iterator
+        for ParseIterator<MAX_N, B>
+    {
+        type Item = Result<Graph<MAX_N>>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            loop {
+                let line = match self.inner.next() {
+                    Some(line) => match line {
+                        Ok(line) => line,
+                        Err(err) => return Some(Err(anyhow!(err))),
+                    },
+                    None => return None,
+                };
+                match self.state {
                     State::Header => {
                         let tokens: Result<Vec<usize>, _> = line
                             .split_whitespace()
@@ -93,24 +144,28 @@ pub mod graph {
 
                         let tokens = match tokens {
                             Ok(t) => t,
-                            Err(e) => {
-                                return Err(anyhow!("Error in line {line_num}:\n{e}"));
+                            Err(err) => {
+                                return Some(Err(anyhow!(
+                                    "Error in line {}:\n{err}",
+                                    self.line_num
+                                )));
                             }
                         };
                         if tokens.len() < 2 {
-                            return Err(anyhow!(
-                                    "Expected format <num_vertices> <num_graphs> in line {line_num}"
-                                    ));
+                            return Some(Err(anyhow!(
+                                "Expected format <num_vertices> <num_graphs> in line {}",
+                                self.line_num
+                            )));
                         }
-                        n = tokens[0];
-                        num_graphs = tokens[1];
-                        state = State::Name;
+                        self.n = tokens[0];
+                        self.num_graphs = tokens[1];
+                        self.state = State::Name;
                     }
                     // Reading name of a graph
                     State::Name => {
-                        state = State::List;
-                        graph = Some(Graph::new(n));
-                        line_num += 1;
+                        self.state = State::List;
+                        self.graph = Some(Graph::new(self.n));
+                        self.line_num += 1;
                         continue;
                     }
                     State::List => {
@@ -120,36 +175,121 @@ pub mod graph {
 
                         let vertices = match vertices {
                             Ok(ver) => ver,
-                            Err(e) => {
-                                return Err(anyhow!("Error in line {line_num} in file {:?}:\n{e}"
-                                                   ,file_path.file_name()));
+                            Err(_) => {
+                                return None;
                             }
                         };
 
                         let v = vertices[0] - 1;
                         let neighbors: Vec<usize> = vertices[1..].iter().map(|v| v - 1).collect();
                         //we know that at this point graph is initialized
-                        graph.as_mut().unwrap().set_neighbors(v, neighbors);
+                        self.graph.as_mut().unwrap().set_neighbors(v, neighbors);
 
-                        if list_counter >= n {
-                            func(graph.unwrap());
-                            graph = None;
-                            state = State::Name;
-                            list_counter = 1;
+                        if self.list_counter >= self.n {
+                            let graph = self.graph.take().unwrap();
+                            self.state = State::Name;
+                            self.list_counter = 1;
+                            return Some(Ok(graph));
                         } else {
-                            list_counter += 1;
+                            self.list_counter += 1;
                         }
                     }
                 }
-                line_num += 1;
+                self.line_num += 1;
             }
-            Ok(())
         }
+    }
+
+    pub fn parse_file<const MAX_N: usize, F>(file_path: &Path, func: F) -> Result<()>
+    where
+        F: Fn(Graph<MAX_N>) -> (),
+    {
+        let f = File::open(file_path)?;
+        let buffer = BufReader::new(f);
+
+        let mut graph: Option<Graph<MAX_N>> = None;
+        let mut list_counter = 1;
+        let mut state = State::Header;
+
+        let mut n = 0;
+        let mut num_graphs = 0;
+        let mut line_num = 1;
+
+        let mut buffer_it = buffer
+            .lines()
+            .filter(|line| !line.as_ref().unwrap().is_empty());
+
+        for line in buffer_it {
+            let line = line?;
+            match state {
+                State::Header => {
+                    let tokens: Result<Vec<usize>, _> = line
+                        .split_whitespace()
+                        .take(2)
+                        .map(|token| token.parse::<usize>())
+                        .collect();
+
+                    let tokens = match tokens {
+                        Ok(t) => t,
+                        Err(e) => {
+                            return Err(anyhow!("Error in line {line_num}:\n{e}"));
+                        }
+                    };
+                    if tokens.len() < 2 {
+                        return Err(anyhow!(
+                            "Expected format <num_vertices> <num_graphs> in line {line_num}"
+                        ));
+                    }
+                    n = tokens[0];
+                    num_graphs = tokens[1];
+                    state = State::Name;
+                }
+                // Reading name of a graph
+                State::Name => {
+                    state = State::List;
+                    graph = Some(Graph::new(n));
+                    line_num += 1;
+                    continue;
+                }
+                State::List => {
+                    let tokens = line.split_whitespace();
+                    let vertices: Result<Vec<usize>, _> =
+                        tokens.map(|token| token.parse::<usize>()).collect();
+
+                    let vertices = match vertices {
+                        Ok(ver) => ver,
+                        Err(e) => {
+                            return Err(anyhow!(
+                                "Error in line {line_num} in file {:?}:\n{e}",
+                                file_path.file_name()
+                            ));
+                        }
+                    };
+
+                    let v = vertices[0] - 1;
+                    let neighbors: Vec<usize> = vertices[1..].iter().map(|v| v - 1).collect();
+                    //we know that at this point graph is initialized
+                    graph.as_mut().unwrap().set_neighbors(v, neighbors);
+
+                    if list_counter >= n {
+                        func(graph.unwrap());
+                        graph = None;
+                        state = State::Name;
+                        list_counter = 1;
+                    } else {
+                        list_counter += 1;
+                    }
+                }
+            }
+            line_num += 1;
+        }
+        Ok(())
+    }
 }
 
 pub mod harmonious {
-    use std::collections::HashSet;
     use crate::graph::Graph;
+    use std::collections::HashSet;
 
     pub struct HarmoniousColoring {
         min_coloring: Vec<usize>,
@@ -187,13 +327,14 @@ pub mod harmonious {
             current_coloring: &mut Vec<Option<usize>>,
             num_visited: usize,
             num_colors: usize,
-            ) {
+        ) {
             match self.test_coloring(&graph, current_coloring, num_visited) {
                 Test::Reject => return,
                 Test::Accept => {
                     if num_colors < self.min_num_colors {
                         self.min_num_colors = num_colors;
-                        let new_min: Option<Vec<usize>> = current_coloring.iter().map(|v| *v).collect();
+                        let new_min: Option<Vec<usize>> =
+                            current_coloring.iter().map(|v| *v).collect();
                         let new_min = new_min.expect("Error in backtracking, incomplete coloring");
                         assert!(new_min.len() == graph.n);
                         self.min_coloring = new_min.to_owned();
@@ -218,7 +359,7 @@ pub mod harmonious {
             graph: &Graph<MAX_N>,
             coloring: &[Option<usize>],
             num_visited: usize,
-            ) -> Test {
+        ) -> Test {
             let harmonious = self.is_harmonious(graph, coloring);
             if !harmonious {
                 Test::Reject
@@ -233,7 +374,7 @@ pub mod harmonious {
             &self,
             graph: &Graph<MAX_N>,
             current_coloring: &[Option<usize>],
-            ) -> bool {
+        ) -> bool {
             let mut pairs_colors: HashSet<(usize, usize)> = HashSet::new();
             for (v, neighbors_v) in graph.iter().enumerate() {
                 let color_v = match current_coloring[v] {
